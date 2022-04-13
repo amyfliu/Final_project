@@ -1,0 +1,160 @@
+---
+title: "Assignment 9: Using real-world data for hypothesis generation"
+author: "Fang Liu"
+date: "03/27/22"
+output:
+  word_document:
+    toc: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Demonstrate Interaction using Regression Models and Tree-based Methods using Exposome Data from HELIX
+
+### Load .Rdata file and merge into single data frame
+
+Reminder: Merging into a single data frame is optional. Depends upon how you program. This example will assume you've merged everything into a single data frame.
+
+```{r dataprep, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(caret)
+library(rpart.plot)
+library(pROC)
+
+#Load data using path of where file is stored
+load("./exposome.RData")
+
+#Merge all data frames into a single data frame. FYI, this is just a shortcut by combining baseR with piping from tidyverse. There are other ways of merging across three data frames that are likely more elegant.
+studydata <- merge(exposome,phenotype,by="ID") %>% merge(covariates, by="ID")
+
+#Strip off ID Variable
+studydata$ID<-NULL
+
+#factor the outcome variable 'hs_asthma' 
+studydata$hs_asthma <- factor(studydata$hs_asthma)
+str(studydata$hs_asthma)
+```
+
+### Step 1: Data Exploration of Training Data
+
+```{r dataexplore}
+#exposure 1 - indoor PM2.5 (postnatal;continuous)
+summary(studydata$h_PM_Log)
+
+studydata %>%
+  ggplot() +
+  geom_histogram(aes(h_PM_Log), bins = 50, color = "black", fill = "pink") +
+  labs(title = "Distribution of indoor PM2.5", x = "Indoor PM2.5", y = "frequency") + 
+  theme_bw()
+
+#exposure 2 - pm10 during pregnancy (continuous)
+summary(studydata$h_pm10_ratio_preg_None)
+
+#exposure 3 - humidity average during pregnancy (continuous)
+summary(studydata$h_humidity_preg_None)
+
+#exposure 4 - tobacco smoke status of parents  (factor with 3 levels)
+str(studydata$hs_smk_parents_None)
+summary(studydata$hs_smk_parents_None) #note: total of 1301 mother-child pairs 
+
+#exposure 5 - traffic density on nearest road at home (postnatal; continuous)
+summary(studydata$hs_trafnear_h_pow1over3)
+
+#correlations
+cor(studydata$h_PM_Log,studydata$h_pm10_ratio_preg_None)
+cor(studydata$h_pm10_ratio_preg_None, studydata$hs_trafnear_h_pow1over3)
+
+#outcome of interest: asthma (outcome at 6-11 years old); factor with 2 levels 
+str(studydata$hs_asthma)
+summary(studydata$hs_asthma) #142 asthma; 1159 without asthma
+```
+
+**Exploratory Analysis: ** My five choosen exposure of interest is `h_PM_Log`, `h_pm10_ratio_preg_None`, `h_humidity_preg_None`, `hs_smk_parents_None`, `hs_trafnear_h_pow1over3` and my phenotype outcome of interest is `hs_asthma`. I choose these variables because I want to see if factors like indoor particulate matter and parent smoking status would impact a child's risk of asthma. From my exploratory analysis, I found the following: the mean indoor PM2.5 is 2.443 (range: 1.549 - 5.236), the mean outdoor pm10 value during pregnancy is 23.018 (range: 8.066 - 27.698), and that the average humidity is 77.10. I also found that of the 1301 mother-child pairs, 142 parents both smoke, 345 only one parent smoke, and the rest does not smoke at all. There is a weak and positive relationship between these variables. As for my outcome of interest `hs_asthma`, only 142 out of the 1301 was diagnosed with asthma at 6-11 years old. 
+
+
+### Step 2: Research Question
+
+Put your Research Question in this section. It can be a prediction question OR it can be a hypothesis-generating question about either combinations of features or interactions between features.
+
+**Prediction RQ: ** What is the probability of having a diagnosis of asthma for a child with certain characteristics (i.e., the 5 selected variables from step 1)?
+
+***
+
+### Step 3: Implement pipeline to address research question
+
+You only need to implement a single algorithm to address your research question.Tune hyperparameters to obtain optimal model in training then evaluate in test set.
+
+```{r algorithm}
+#Data Partition
+set.seed(100)
+train_indices<-createDataPartition(y=studydata$hs_asthma,p=0.7,list=FALSE)
+train_data<-studydata[train_indices, ] #912
+test_data<-studydata[-train_indices, ] #389
+
+summary(studydata$hs_asthma)
+#highly unbalanced: no asthma = 1159, asthma = 142 --> upsampling needed!!
+```
+
+#### Lasso 
+```{r}
+set.seed(100)
+
+lambda <- 10^seq(-3, 3, length = 100)
+
+lasso_asthma <- train(
+  hs_asthma ~., data=train_data, method ="glmnet", family = "binomial",
+  trControl=trainControl("cv", number=10), 
+  tuneGrid=expand.grid(alpha = 1, lambda = lambda)
+)
+
+lasso_asthma$bestTune 
+varImp(lasso_asthma)
+```
+
+
+#### Elastic Net
+```{r}
+set.seed(100)
+
+en_asthma <- train(hs_asthma ~ h_PM_Log + h_pm10_ratio_preg_None + h_humidity_preg_None + hs_smk_parents_None + hs_trafnear_h_pow1over3, data=train_data, method="glmnet",family="binomial", trControl = trainControl("cv", number = 10, sampling= "up"), tuneLength=10)
+
+en_asthma$bestTune
+en_asthma$results[36,] #accuracy of 0.573495
+```
+
+#### For fun: Ensemble method (bagging)
+```{r}
+set.seed(100)
+
+#Note: in bagging, ALL predictor features are eligible for selection at each node 
+mtry_val1 <- expand.grid(.mtry = 5)
+
+bag_asthma<-train(hs_asthma ~ h_PM_Log + h_pm10_ratio_preg_None + h_humidity_preg_None + hs_smk_parents_None + hs_trafnear_h_pow1over3, data=train_data, method="rf", metric="Accuracy", trControl = trainControl("cv", number = 10, sampling= "up"), tuneGrid=mtry_val1, ntree=100)
+
+bag_asthma$results #accuracy = 0.8563545
+```
+
+#### Model Evaluation for Elastic Net
+```{r}
+asthma_pred = predict(en_asthma, test_data)
+asthma_pred_prob = predict(en_asthma, test_data, type = "prob")
+
+#Confusion Matrix
+en_eval = confusionMatrix(asthma_pred, test_data$hs_asthma, positive = "1")
+en_eval #accuracy: 0.5398 
+
+#AUC 
+auc = roc(response=test_data$hs_asthma, predictor=asthma_pred_prob[,2])
+auc$auc #0.6118
+
+#Variable importance
+varImp(en_asthma)
+```
+
+I chosen the **elastic net** algorithm to answer my research question. The model accuracy is only 0.573495 for the training data, with the hyperparameter alpha = 0.6. When I evaluate my model in the testing set, the model accuracy is 0.5498. The sensitivity and specificity is also fairly low; the area under the curve is **0.6118**. As for the variable importance, we see that the smoking status of the parent plays the biggest role. 
+
