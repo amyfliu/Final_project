@@ -100,7 +100,7 @@ summary(studydata$hs_asthma)
 #highly unbalanced: no asthma = 1159, asthma = 142 --> upsampling needed!!
 ```
 
-#### Lasso 
+#### LASSO 
 ```{r}
 set.seed(100)
 

@@ -36,22 +36,32 @@ hw9_train<-hw9[train_index,] #912 obs
 hw9_test<-hw9[-train_index,] #389 obs
 
 
+
+
+
+
 ###PREDICTION VARIABLES SELECTION FROM ALL VARIABLES
 
-#part 1 - remove features with >0.8 correlation on the training data
+#Pt. 1 - remove features with >0.8 correlation on the training data
 
-#Finding correlated predictors
+# Finding correlated predictors
 hw9_train_numeric<- hw9_train %>% dplyr::select(where(is.numeric))
+hw9_train_categorical <- hw9_train %>% dplyr::select(!where(is.numeric))
 
 correlations<-cor(hw9_train_numeric, use="complete.obs")
-high.correlations<-findCorrelation(correlations, cutoff=0.8)  ###出现问题： 里面没有outcome - 因为是binary。；
+high.correlations<-findCorrelation(correlations, cutoff=0.8)  
 
-#Remove highly correlated features
+# findCorrelation() searches through a correlation matrix and returns a vector of integers
+# corresponding to COLUMNS to remove to reduce pair-wise correlations
+
+# Remove highly correlated features
 hw9_train_low_corr<-hw9_train_numeric[,-high.correlations] #241 variables -> 145 variables (continuous)
 
+#Combine the low-correlated numerical variables & categorical variables
+final_data = bind_cols(hw9_train_low_corr, hw9_train_categorical)
 
-##解决： amy看看如何把low correlated data set 和factor/categorical 的covairates + outcome合并。然后新的dataset用来下一步model。
-
+#codebook_simple = codebook %>% select(variable_name, var_type, description)
+hw9_train_categorical 
 
 #part 2 - GBM Model for features selection;
 
@@ -60,6 +70,7 @@ set.seed(100)
 #only running a few bootstrapped samples
 control.settings<-trainControl(number = 5)
 gbm_hyp<-expand.grid(n.trees=(0:10)*100, shrinkage=c(0.01, 0.001), interaction.depth=c(1,3), n.minobsinnode=10)
+
 model_gbm<-train(hs_asthma~., data=hw9_train, method="gbm", distribution="bernoulli", 
                  verbose=F, tuneGrid=gbm_hyp, trControl=control.settings)
 #model了全部，data set 不对，需要更改后再run。

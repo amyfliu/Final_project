@@ -1,0 +1,161 @@
+---
+title: "final_project"
+author: "Fang Liu"
+date: "4/13/2022"
+output:
+  html_document:
+    hide: TRUE
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(rpart.plot) # for creating classification tree outputs
+library(glmnet)
+library(Amelia)
+library(pROC) #for calculating ROC/AUC
+library(gbm)
+```
+
+## Data Cleaning & Preprocessing 
+```{r}
+#Load data using path of where file is stored
+load("exposome.RData")
+data <- merge(exposome,phenotype,by="ID") %>% merge(covariates, by="ID")
+
+#Strip off ID Variable
+data$ID<-NULL
+
+#make variable as factor
+data$hs_asthma <- as.factor(data$hs_asthma)
+
+# Finding correlated predictors
+data_numeric <- data %>% select(where(is.numeric))
+data_categorical <- data %>% select(!where(is.numeric))
+
+correlations <- cor(data_numeric, use="complete.obs")
+high.correlations <- findCorrelation(correlations, cutoff=0.8)  
+
+# findCorrelation() searches through a correlation matrix and returns a vector of integers corresponding to COLUMNS to remove to reduce pair-wise correlations
+
+# Remove highly correlated features
+data_numeric_low_corr <- data_numeric[,-high.correlations] #241 variables -> 145 variables (continuous)
+
+#Combine the low-correlated numerical variables & categorical variables
+final_data = bind_cols(data_numeric_low_corr, data_categorical) 
+#1301 observations x 220 variables columns
+```
+
+> 241 variables = 180 numerical variables + 61 categorical variables
+> After removing 21 highly correlated numeric variables (180-21=159), we are left with 220 variables.
+
+## Data Partition 
+```{r}
+set.seed(100)
+train_index <- createDataPartition(y=final_data$hs_asthma, p=0.7, list=FALSE)
+train_data <- final_data[train_index,] #912
+test_data <- final_data[-train_index,] #389
+
+summary(final_data$hs_asthma) #very unbalanced 1159 vs. 142
+#str(train_data$hs_asthma)
+```
+
+
+## Variable Selection (use cross validated GBM model)
+```{r}
+set.seed(100)
+#getModelInfo("gbm")
+
+#without tuning
+gbm.caret <- train(hs_asthma~., data=train_data, method="gbm", distribution="bernoulli", verbose=F, tuneGrid=data.frame(.n.trees=10, .shrinkage=0.001, .interaction.depth=1, .n.minobsinnode=10))
+
+confusionMatrix(gbm.caret) #0.8923
+varImp(gbm.caret)
+
+#testing different parameters
+control.settings<-trainControl(number = 5) #default: bootstrap
+gbm_hyp<-expand.grid(n.trees=(0:5)*100, shrinkage=c(0.01, 0.001), interaction.depth=c(1,3), n.minobsinnode=10)
+
+#train model using training data
+model_gbm <- train(hs_asthma~., data=data_train, method="gbm", distribution="bernoulli", verbose=F, tuneGrid=gbm_hyp, trControl=control.settings)
+
+confusionMatrix(model_gbm) #0.8887
+model_gbm$results
+model_gbm$bestTune
+varImp(model_gbm) 
+
+```
+
+
+### Random Forest
+```{r}
+set.seed(100)
+
+#Random forest
+
+#hyper parameter tuning: mtry
+mtry_val2 <- c(ncol(train_data)-1, sqrt(ncol(train_data)-1), 0.5*ncol(train_data)-1)
+mtry_grid <- expand.grid(.mtry=mtry_val2) 
+
+#5-fold cross-validation with upsampling
+rf_asthma <- train(hs_asthma ~ ., data=train_data, method="rf", trControl=trainControl("cv", number=5, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
+
+rf_asthma$bestTune
+rf_asthma$results #0.89 accuracy
+#rf_mi$finalModel
+
+confusionMatrix(rf_asthma)
+
+varlist = varImp(rf_asthma)[["importance"]]
+important_vars = varlist %>% filter(Overall > 60) %>% arrange(-Overall)
+
+#predictors(rf_asthma)
+plot(varImp(rf_asthma), top=20)
+#plot(rf_asthma)
+
+```
+
+```{r}
+#OPTION 1 - Only keep the variables deemed to be important by random forest in the model
+train_data2 = train_data %>% select(rownames(important_vars), hs_asthma)
+
+rf2_asthma <- train(hs_asthma ~ ., data=train_data2, method="rf", trControl=trainControl("cv", number=10, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
+rf2_asthma$results
+#rf2_asthma[["resample"]]
+
+varImp(rf2_asthma)
+plot(varImp(rf2_asthma))
+
+#from important_vars list
+#OPTION 2 - keep the original data, just change the model formula
+rf3_asthma <- train(hs_asthma ~ hs_cd_m_Log2+h_trafnear_preg_pow1over3+ h_builtdens300_preg_Sqrt+hs_pbde153_cadj_Log2+h_popdens_preg_Sqrt+hs_pfunda_m_Log2+hs_pfhxs_c_Log2, data=train_data, method="rf", trControl=trainControl("cv", number=5, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
+rf3_asthma$results
+varImp(rf3_asthma)
+
+
+```
+
+### LASSO 
+```{r}
+set.seed(100)
+
+lambda <- 10^seq(-3, 3, length = 100)
+
+lasso_asthma <- train(
+  hs_asthma ~., data=train_data, method ="glmnet", family = "binomial",
+  trControl=trainControl("cv", number=10), 
+  tuneGrid=expand.grid(alpha = 1, lambda = lambda)
+)
+
+lasso_asthma$bestTune 
+varlist = varImp(lasso_asthma)
+plot(varImp(lasso_asthma), top=50)
+predictors(lasso_asthma)
+
+
+#varlist = varImp(lasso_asthma)[["importance"]]
+```
+
