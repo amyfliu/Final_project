@@ -18,6 +18,12 @@ library(glmnet)
 library(Amelia)
 library(pROC) #for calculating ROC/AUC
 library(gbm)
+#library(ggbiplot)
+
+library(stats)
+library(factoextra)
+library(cluster)
+
 ```
 
 ## Data Cleaning & Preprocessing 
@@ -90,54 +96,6 @@ varImp(model_gbm)
 ```
 
 
-### Random Forest
-```{r}
-set.seed(100)
-
-#Random forest
-
-#hyper parameter tuning: mtry
-mtry_val2 <- c(ncol(train_data)-1, sqrt(ncol(train_data)-1), 0.5*ncol(train_data)-1)
-mtry_grid <- expand.grid(.mtry=mtry_val2) 
-
-#5-fold cross-validation with upsampling
-rf_asthma <- train(hs_asthma ~ ., data=train_data, method="rf", trControl=trainControl("cv", number=5, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
-
-rf_asthma$bestTune
-rf_asthma$results #0.89 accuracy
-#rf_mi$finalModel
-
-confusionMatrix(rf_asthma)
-
-varlist = varImp(rf_asthma)[["importance"]]
-important_vars = varlist %>% filter(Overall > 60) %>% arrange(-Overall)
-
-#predictors(rf_asthma)
-plot(varImp(rf_asthma), top=20)
-#plot(rf_asthma)
-
-```
-
-```{r}
-#OPTION 1 - Only keep the variables deemed to be important by random forest in the model
-train_data2 = train_data %>% select(rownames(important_vars), hs_asthma)
-
-rf2_asthma <- train(hs_asthma ~ ., data=train_data2, method="rf", trControl=trainControl("cv", number=10, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
-rf2_asthma$results
-#rf2_asthma[["resample"]]
-
-varImp(rf2_asthma)
-plot(varImp(rf2_asthma))
-
-#from important_vars list
-#OPTION 2 - keep the original data, just change the model formula
-rf3_asthma <- train(hs_asthma ~ hs_cd_m_Log2+h_trafnear_preg_pow1over3+ h_builtdens300_preg_Sqrt+hs_pbde153_cadj_Log2+h_popdens_preg_Sqrt+hs_pfunda_m_Log2+hs_pfhxs_c_Log2, data=train_data, method="rf", trControl=trainControl("cv", number=5, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
-rf3_asthma$results
-varImp(rf3_asthma)
-
-
-```
-
 ### LASSO 
 ```{r}
 set.seed(100)
@@ -158,4 +116,99 @@ predictors(lasso_asthma)
 
 #varlist = varImp(lasso_asthma)[["importance"]]
 ```
+
+
+### Random Forest
+```{r}
+set.seed(100)
+
+#Random forest
+
+#hyper parameter tuning: mtry
+mtry_val2 <- c(ncol(train_data)-1, sqrt(ncol(train_data)-1), 0.5*ncol(train_data)-1)
+mtry_grid <- expand.grid(.mtry=mtry_val2) 
+
+#5-fold cross-validation with upsampling
+rf_asthma <- train(hs_asthma ~ ., data=train_data, method="rf", trControl=trainControl("cv", number=5, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
+
+rf_asthma$bestTune
+rf_asthma$results #0.89 accuracy
+#rf_mi$finalModel
+
+confusionMatrix(rf_asthma)
+
+varlist = varImp(rf_asthma)[["importance"]]
+important_vars = varlist %>% filter(Overall > 50) %>% arrange(-Overall)
+
+#predictors(rf_asthma)
+plot(varImp(rf_asthma), top=20)
+#plot(rf_asthma)
+
+```
+
+### Random Forest
+```{r}
+#OPTION 1 - Only keep the variables deemed to be important by random forest in the model
+train_data2 = train_data %>% select(rownames(important_vars), hs_asthma)
+
+rf2_asthma <- train(hs_asthma ~ ., data=train_data2, method="rf", trControl=trainControl("cv", number=10, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
+rf2_asthma$results
+#rf2_asthma[["resample"]]
+
+varImp(rf2_asthma)
+plot(varImp(rf2_asthma))
+confusionMatrix(rf2_asthma)
+
+
+#from important_vars list
+#OPTION 2 - keep the original data, just change the model formula
+rf3_asthma <- train(hs_asthma ~ hs_cd_m_Log2+h_trafnear_preg_pow1over3+ h_builtdens300_preg_Sqrt+hs_pbde153_cadj_Log2+h_popdens_preg_Sqrt+hs_pfunda_m_Log2+hs_pfhxs_c_Log2, data=train_data, method="rf", trControl=trainControl("cv", number=5, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
+rf3_asthma$results
+varImp(rf3_asthma)
+
+confusionMatrix(rf3_asthma)
+
+```
+
+### Elastic Net
+```{r}
+set.seed(100)
+#create 10*10 pairs of parameters for tune length in elastic net model
+EN_asthma<- train(
+  hs_asthma ~., data = train_data, method = "glmnet",family="binomial",
+  trControl = trainControl("cv", number = 10), preProc=c("center", "scale"),
+  tuneLength=10  )
+```
+
+### Bagging/Boosting
+```{r}
+
+```
+
+### Unsupervised (k-means)
+```{r}
+set.seed(100)
+
+#exposome_test <- exposome %>% select(-1) %>% select(where(is.numeric))
+
+#scale data
+set.up.preprocess<-preProcess(data_numeric_low_corr, method=c("center", "scale"))
+transformed.vals<-predict(set.up.preprocess, data_numeric_low_corr)
+
+#Conduct a gap statistic analysis to determine optimal number of clusters 
+gap_stat<-clusGap(transformed.vals, FUN=kmeans, nstart=10, K.max=10, B=10, iter.max=50) 
+print(gap_stat, method="firstmax")
+fviz_gap_stat(gap_stat) #6
+
+#perform k-means & visualize the clusters
+clusters<-kmeans(transformed.vals, 6, nstart=25)
+str(clusters)
+fviz_cluster(clusters, data=transformed.vals)
+#Show the mean value of features within each cluster
+clusters$centers
+
+#combine original data and the clustering results 
+data_with_cluster <- cbind(data_numeric_low_corr,cluster=clusters$cluster)
+```
+
 
