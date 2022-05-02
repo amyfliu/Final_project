@@ -1,0 +1,337 @@
+---
+title: "EPIDP8451 Final Project - An applicatoin of machine learning to identify potential risk factors for early childhood asthma"
+author: "Fang Liu (fl2569), Jing Wen (jw4061)"
+date: "4/13/2022"
+output:
+  html_document:
+    hide: TRUE
+    toc: yes
+    toc_float: yes
+---
+
+------------------------------------------------------------------------
+
+# Reseach Background
+
+## Research Question
+
+What are the risk factors for predicting asthma diagnosis in children of early school age?
+
+## Research Rationale
+
+Asthma is the most common chronic airway disease of childhood. The etiology of asthma is not fully understood, but family history of the disease, respiratory infections, as well as environmental factors (e.g. airborne pollutants) may contribute to disease development. This study aims to identify modifiable risk factors of asthma for predicting asthma during early school age.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(rpart.plot) # for creating classification tree outputs
+library(glmnet)
+library(Amelia)
+library(pROC) #for calculating ROC/AUC
+library(gbm)
+library(stats)
+library(factoextra)
+library(cluster)
+```
+
+------------------------------------------------------------------------
+
+# Part 1 - Data preparation
+
+## Data Cleaning & Preprocessing
+
+In this step, we performed data cleaning for final dataset which included: 1) load data, 2) change categorical variables to factors, 3) strip ID variable, 4) check for missing values, 5) check if there is imbalance of outcome distribution, and 6) address collinearity by removing features with \>0.8 correlation before modeling.
+
+```{r}
+#Load data
+load("./exposome.RData")
+data <- merge(exposome,phenotype,by="ID") %>% merge(covariates, by="ID")
+
+#Strip off ID Variable
+data$ID<-NULL
+
+#make variable as factor
+data$hs_asthma <- as.factor(data$hs_asthma) #241 features
+
+# Finding correlated predictors
+data_numeric <- data %>% select(where(is.numeric)) #180 features
+data_categorical <- data %>% select(!where(is.numeric)) #61 features
+
+correlations <- cor(data_numeric, use="complete.obs")
+high.correlations <- findCorrelation(correlations, cutoff=0.8)  
+
+#findCorrelation() searches through a correlation matrix and returns a vector of integers corresponding to COLUMNS to remove to reduce pair-wise correlations
+
+# Remove highly correlated features
+data_numeric_low_corr <- data_numeric[,-high.correlations] #159 variables (continuous)
+
+#Combine the low-correlated numerical variables & categorical variables
+final_data = bind_cols(data_numeric_low_corr, data_categorical) 
+#1301 observations x 220 variables columns
+
+#check missing data
+missmap(final_data, main = "Missing values vs observed", x.cex = 0.5, y.cex = 0.5) 
+
+#check if data is balanced
+summary(final_data$hs_asthma) #very unbalanced 1159 vs. 142
+#str(train_data$hs_asthma)
+```
+
+**Conclusion:** In the original dataset, there are 241 features (180 numerical variables + 61 categorical variables); We removed 21 highly correlated numeric variables (180-21=159), so we are left with 220 variables for feature selection for the next step.
+
+## Data Partition
+
+In this step, models would be trained on 70% of patient data (the training set) and tested on the remaining 30% (the test set) as an internal validation of the model.
+
+```{r}
+set.seed(100)
+train_index <- createDataPartition(y=final_data$hs_asthma, p=0.7, list=FALSE)
+train_data <- final_data[train_index,] #912
+test_data <- final_data[-train_index,] #389
+
+```
+
+# Part 2 - Variable Selection
+
+## Variable Selection using random forest (i.e., find which variables to include in model)
+
+```{r}
+set.seed(100)
+
+#hyper parameter tuning: mtry
+mtry_val2 <- c(ncol(train_data)-1, sqrt(ncol(train_data)-1), 0.5*ncol(train_data)-1)
+mtry_grid <- expand.grid(.mtry=mtry_val2) 
+
+#5-fold cross-validation with upsampling
+rf_asthma <- train(hs_asthma ~ ., data=train_data, method="rf", trControl=trainControl("cv", number=5, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
+
+rf_asthma$bestTune
+rf_asthma$results 
+rf_asthma$finalModel
+confusionMatrix(rf_asthma)
+
+#find which variables are considered "important"
+varlist = varImp(rf_asthma)[["importance"]]
+important_vars = varlist %>% filter(Overall > 50) %>% arrange(-Overall)
+
+#predictors(rf_asthma)
+#plot(varImp(rf_asthma), top=16)
+#plot(rf_asthma)
+
+#paste(rownames(important_vars), collapse = " + ")
+```
+
+**Conclusion:** Feature selection was done by a first round of 5-fold cross validated Random Forest model on the full predictor set after removing highly-correlated features (220 features). We used the top 16 features from this model's feature importance (i.e., individual features with 50% importance or higher were selected). A complete list of predictor variables is as followed: `r rownames(important_vars)`.
+
+### DEBUG ONLY
+
+```{r}
+#OPTION 1 - Only keep the variables deemed to be important by random forest in the model
+set.seed(100)
+train_data2 = train_data %>% select(rownames(important_vars), hs_asthma)
+
+rf2_asthma <- train(hs_asthma ~ ., data=train_data2, method="rf", trControl=trainControl("cv", number=5, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
+
+#rf2_asthma[["resample"]]
+
+rf2_asthma$results
+confusionMatrix(rf2_asthma) 
+
+#OPTION 2 - keep the original data, just change the model formula
+set.seed(100)
+#paste(rownames(important_vars), collapse = " + ")
+
+rf3_asthma <- train(hs_asthma ~ hs_cd_m_Log2 + h_trafnear_preg_pow1over3 + h_builtdens300_preg_Sqrt + hs_pbde153_cadj_Log2 + h_popdens_preg_Sqrt + hs_pfunda_m_Log2 + hs_pfhxs_c_Log2 + hs_ndvi100_s_None + hs_mehp_cadj_Log2 + hs_dmtp_cadj_Log2 + hs_ddt_cadj_Log2 + h_ndvi100_preg_None + hs_dep_madj_Log2 + hs_pm10_dy_hs_h_None + hs_pm25abs_wk_hs_h_Log + hs_cu_c_Log2, data=train_data, method="rf", trControl=trainControl("cv", number=5, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
+
+rf3_asthma$results
+confusionMatrix(rf3_asthma)
+```
+
+# Part 3 - Construct prediction models
+
+## Model Building & Evaluation
+
+In this step, several machine-learning methods were applied and assessed to predict asthma diagnosis. These methods include Classification Tree (CART), Logistic Regression with regularization (Elastic Net), Support Vector Machine (SVM) and Bagging. To reduce the problem of imbalanced outcome distribution, imbalance corrections were used with Random upsampling which showed the better performance than downsampling.
+
+In addition, to improve the robustness and avoid overfitting (lack of generalization), we used 10-fold cross-validation with group split for the model selection process on the training data.
+
+> NOTE: need to address unbalanced data for elastic net, random forests, bagging, support vector machine; don't have to for regular logistic regression
+
+### Model 1: Classification Tree (CART)
+
+```{r}
+set.seed(100)
+
+#10-fold cross-validation
+train_control1 = trainControl(method="cv", number=10, sampling="up")
+
+#create sequence of cp parameters
+grid <- expand.grid(cp=seq(0.001, 0.007, by=0.0005))
+
+#train model 
+tree_asthma <- train(hs_asthma ~ hs_cd_m_Log2 + h_trafnear_preg_pow1over3 + h_builtdens300_preg_Sqrt + hs_pbde153_cadj_Log2 + h_popdens_preg_Sqrt + hs_pfunda_m_Log2 + hs_pfhxs_c_Log2 + hs_ndvi100_s_None + hs_mehp_cadj_Log2 + hs_dmtp_cadj_Log2 + hs_ddt_cadj_Log2 + h_ndvi100_preg_None + hs_dep_madj_Log2 + hs_pm10_dy_hs_h_None + hs_pm25abs_wk_hs_h_Log + hs_cu_c_Log2,
+                     data = train_data, method="rpart", trControl=train_control1,
+                     tuneGrid = grid)
+
+tree_asthma$bestTune 
+confusionMatrix(tree_asthma) #accuracy - 0.7577
+#predictors(tree_asthma)
+```
+
+### Model 2: Elastic Net (regularized regression)
+
+```{r}
+set.seed(100)
+
+en_asthma <- train(hs_asthma ~ hs_cd_m_Log2 + h_trafnear_preg_pow1over3 + h_builtdens300_preg_Sqrt + hs_pbde153_cadj_Log2 + h_popdens_preg_Sqrt + hs_pfunda_m_Log2 + hs_pfhxs_c_Log2 + hs_ndvi100_s_None + hs_mehp_cadj_Log2 + hs_dmtp_cadj_Log2 + hs_ddt_cadj_Log2 + h_ndvi100_preg_None + hs_dep_madj_Log2 + hs_pm10_dy_hs_h_None + hs_pm25abs_wk_hs_h_Log + hs_cu_c_Log2,
+                   data=train_data, 
+                   method="glmnet",
+                   family="binomial", 
+                   trControl = trainControl("cv", number = 10, sampling= "up"),
+                   tuneLength=10)
+
+en_asthma$bestTune
+confusionMatrix(en_asthma) #accuracy - 0.6338
+#predictors(en_asthma)
+```
+
+### Model 3: Traditional Logistic regression
+
+```{r}
+set.seed(100)
+
+logit_asthma <- train(hs_asthma ~ hs_cd_m_Log2 + h_trafnear_preg_pow1over3 + h_builtdens300_preg_Sqrt + hs_pbde153_cadj_Log2 + h_popdens_preg_Sqrt + hs_pfunda_m_Log2 + hs_pfhxs_c_Log2 + hs_ndvi100_s_None + hs_mehp_cadj_Log2 + hs_dmtp_cadj_Log2 + hs_ddt_cadj_Log2 + h_ndvi100_preg_None + hs_dep_madj_Log2 + hs_pm10_dy_hs_h_None + hs_pm25abs_wk_hs_h_Log + hs_cu_c_Log2, data = train_data, method="glm", family = "binomial", trControl=trainControl(method="cv", number = 10))
+
+logit_asthma$results
+confusionMatrix(logit_asthma) #0.8893
+```
+
+### Model 4: Support Vector Machine
+
+> A lot of times have similar results to logistic regression, but less interpretable..
+
+```{r}
+set.seed(100)
+
+#train model 
+svm_asthma <- train(hs_asthma ~ hs_cd_m_Log2 + h_trafnear_preg_pow1over3 + h_builtdens300_preg_Sqrt + hs_pbde153_cadj_Log2 + h_popdens_preg_Sqrt + hs_pfunda_m_Log2 + hs_pfhxs_c_Log2 + hs_ndvi100_s_None + hs_mehp_cadj_Log2 + hs_dmtp_cadj_Log2 + hs_ddt_cadj_Log2 + h_ndvi100_preg_None + hs_dep_madj_Log2 + hs_pm10_dy_hs_h_None + hs_pm25abs_wk_hs_h_Log + hs_cu_c_Log2, data = train_data, method="svmLinear", trControl=trainControl(method="cv", number = 10, sampling="up"), preProcess = c("center","scale"), tuneGrid=expand.grid(C=seq(0.001,2,length=10)))
+
+svm_asthma$bestTune
+#svm_asthma$results
+confusionMatrix(svm_asthma) #0.5833
+```
+
+### Ensemble Methods
+
+### Bagging
+
+```{r}
+set.seed(100)
+
+#mtry_val2 <- c(ncol(train_data)-1, sqrt(ncol(train_data)-1), 0.5*ncol(train_data)-1)
+#mtry_grid <- expand.grid(.mtry=mtry_val2) 
+
+#Note: in bagging, ALL predictor features are eligible for selection at each node 
+mtry_val1 <- expand.grid(.mtry = c(ncol(train_data)-1, sqrt(ncol(train_data)-1), 0.5*ncol(train_data)-1))
+
+bag_asthma<-train(hs_asthma ~ hs_cd_m_Log2 + h_trafnear_preg_pow1over3 + h_builtdens300_preg_Sqrt + hs_pbde153_cadj_Log2 + h_popdens_preg_Sqrt + hs_pfunda_m_Log2 + hs_pfhxs_c_Log2 + hs_ndvi100_s_None + hs_mehp_cadj_Log2 + hs_dmtp_cadj_Log2 + hs_ddt_cadj_Log2 + h_ndvi100_preg_None + hs_dep_madj_Log2 + hs_pm10_dy_hs_h_None + hs_pm25abs_wk_hs_h_Log + hs_cu_c_Log2, 
+                  data=train_data, 
+                  method="rf", 
+                  metric="Accuracy", 
+                  trControl = trainControl("cv", number = 10, sampling="up"),
+                  tuneGrid=mtry_val1, ntree=100) #10-fold cross-validation
+
+bag_asthma$bestTune
+bag_asthma$results
+confusionMatrix(bag_asthma) #pick the best model using accuracy - 0.8827
+```
+
+### Random forest
+
+```{r}
+set.seed(100)
+
+rf3_asthma <- train(hs_asthma ~ hs_cd_m_Log2 + h_trafnear_preg_pow1over3 + h_builtdens300_preg_Sqrt + hs_pbde153_cadj_Log2 + h_popdens_preg_Sqrt + hs_pfunda_m_Log2 + hs_pfhxs_c_Log2 + hs_ndvi100_s_None + hs_mehp_cadj_Log2 + hs_dmtp_cadj_Log2 + hs_ddt_cadj_Log2 + h_ndvi100_preg_None + hs_dep_madj_Log2 + hs_pm10_dy_hs_h_None + hs_pm25abs_wk_hs_h_Log + hs_cu_c_Log2, data=train_data, method="rf", trControl=trainControl("cv", number=10, sampling="up"), metric="Accuracy", tuneGrid=mtry_grid, ntree=100)
+
+#predictors(rf3_asthma)
+rf3_asthma$results
+confusionMatrix(rf3_asthma) #0.8761
+```
+
+### Model comparison
+
+In this step, to compare performance with multiple algorithms,
+
+"To compare performance with previous similar studies, the Area Under the Receiver Operating Characteristics (AUROC) was also reported. However, accuracy and AUROC can be misleading indicators of performance when dealing with imbalanced classes such as the exacerbation outcome considered here. AUPRC is better suited for cases with a high imbalance ratio. The model with the highest mean cross validation score of AUPRC was selected as the final model and was in a final step trained on the entire training dataset."我们要用AUPRC吗？
+
+```{r}
+#ensemble and logistic is good!! :D 
+#我们确定选的3个model放在这里compare:
+confusionMatrix(tree_readmission)
+```
+
+# Part 4 - Select final model & evaluate
+
+**Final model:** Bagging Ensemble
+
+### Evaluate final model performance using testing set
+
+```{r}
+asthma_pred = predict(bag_asthma, test_data)
+asthma_pred_prob = predict(bag_asthma, test_data, type = "prob")
+
+#Confusion Matrix
+en_eval = confusionMatrix(asthma_pred, test_data$hs_asthma, positive = "1")
+en_eval #accuracy: 0.8817
+
+#AUC 
+auc = roc(response=test_data$hs_asthma, predictor=asthma_pred_prob[,2])
+auc$auc #0.5467... very low
+
+
+
+#Variable importance
+varImp(bag_asthma)
+```
+
+> Since we have balanced data, we can use AUC as the evaluation metric, rather than using accuracy.
+
+In conclusion: Bagging model was selected as the final model because it had the highest XXX. AUPRC was xxxxxx for the whole training set and xxxxx for the testing set. In the testing set, XXXXX evaluation metrics. The 10 most important factors for predicting asthama diagnosis are XXX. The most important predictor was XXX followed by XXXX.Other predictors that were identified among the top 14 factors were predictors related to previous exacerbations, number of contacts due to asthma and time since first oral steroids prescription in days.
+
+# Part 5 - Unsupervised (k-means)
+
+```{r}
+set.seed(100)
+
+#exposome_test <- exposome %>% select(-1) %>% select(where(is.numeric))
+
+#scale data
+set.up.preprocess<-preProcess(data_numeric_low_corr, method=c("center", "scale"))
+transformed.vals<-predict(set.up.preprocess, data_numeric_low_corr)
+
+#Conduct a gap statistic analysis to determine optimal number of clusters 
+gap_stat<-clusGap(transformed.vals, FUN=kmeans, nstart=10, K.max=10, B=10, iter.max=50) 
+print(gap_stat, method="firstmax")
+fviz_gap_stat(gap_stat) #6
+
+#perform k-means & visualize the clusters
+clusters<-kmeans(transformed.vals, 6, nstart=25)
+str(clusters)
+fviz_cluster(clusters, data=transformed.vals)
+#Show the mean value of features within each cluster
+clusters$centers
+
+#combine original data and the clustering results 
+data_with_cluster <- cbind(data_numeric_low_corr,cluster=clusters$cluster)
+```
+
+**Interpretation:**
+
+## Discussion
+
+In this observational cohort study, by using machine learning algorithms, we identified several prediction factors for asthma diagnosis in children patients, some previously known and others novel. The top factors included XXXXXX.解释一下这些predictors对于asthma的意义。
+
+The strengths of our study includes large sample size and multiple machine learning methods used compared with more traditional logistic regression approach. The methods were compared based on XXXXX and the method with the highest score was selected as final model. The performance of the final model was also validated on a large test set (N=). Additionally, feature selection was performed before modeling which contributed to a better prediction for the model building part.
+
+Limitations of the study: 1. our model would only be applicable to healthcare settings in other countries within Europe. 2. need external data samples for external validation - generalizability. 3. Ethical issus??
